@@ -127,9 +127,8 @@ function init_custom_gateway_class(){
         }
 
         public function success() {
- 
-            $order = wc_get_order( $_GET['id'] );
-            $order->payment_complete();
+            
+            echo 'payment success';
         }
 
         public function timeout() {
@@ -145,23 +144,114 @@ function init_custom_gateway_class(){
          * @return array
          */
         function process_payment( $order_id ) {
-    global $woocommerce;
-    $order = new WC_Order( $order_id );
-
-    // Mark as on-hold (we're awaiting the cheque)
-    bidii_pay_process_payment($order_id);
-    $order->update_status('pending-payment', __( 'Awaiting M-Pesa payment', 'kary' ));
+            $order = wc_get_order( $order_id );
+            $total = $order -> get_total();
+            // Mark as on-hold (we're awaiting the cheque)
+            $total = (int)$order -> get_total();
+    $mobile=$_POST['mobile'];
+    // var_dump($total);
+    // exit();
+    
+    if($_POST['payment_method'] != 'bidii_pay_mpesa'){
+        return;
+    }
+    
+    if( !isset($_POST['mobile']) || empty($_POST['mobile']) ){
+        wc_add_notice( __( 'Please add your mobile number', 'bidii_pay' ), 'error' );
+    }
+    
+    if( isset($mobile)){
+        
+        $mobile = (substr($mobile, 0, 1) == "+") ? str_replace("+", "", $mobile) : $mobile;
+        $mobile = (substr($mobile, 0, 1) == "0") ? preg_replace("/^0/", "254", $mobile) : $mobile;
+        $mobile = (substr($mobile, 0, 1) == "7") ? "254{$mobile}" : $mobile;
+        
+        $config = array(
+            "env"              => "sandbox",
+            "BusinessShortCode"=> "174379",
+            "key"              => "6fSidiQK1v1f9sJG9m8Tzbs3SVTPgYfW", 
+            "secret"           => "3hosoK1vkgnXv80u", 
+            "username"         => "testapi",
+            "TransactionType"  => "CustomerPayBillOnline",
+            "passkey"          => "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919", 
+            "CallBackURL"     => "https://charityfarm.co.ke/wc-api/timeout",
+            "AccountReference" => "CompanyXLTD",
+            "TransactionDesc"  => "Payment of X" ,
+        );
+        $access_token = ($config['env']  == "live") ? "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials" : "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"; 
+        
+        
+        $credentials = base64_encode($config['key'] . ':' . $config['secret']); 
+        $get_token = array(
+            'headers' => array(
+                'Authorization' => 'Basic '.$credentials
+            ));
             
-
-    // Return thankyou redirect
-    return array(
-        'result' => 'success',
-        'redirect' => site_url().'/confirm-payment/'
-    );
+            
+            $response = wp_remote_get( $access_token, $get_token );
+            if ( ( !is_wp_error($response))) {
+                $responseBody = wp_remote_retrieve_body( $response );
+                $token_response = json_decode($responseBody);
+                $token = isset( $token_response -> access_token) ?  $token_response -> access_token  : '';
+                // echo 'Token: '.$token;
+                
+            }
+            $timestamp = date("YmdHis");
+            $password  = base64_encode($config['BusinessShortCode'] . "" . $config['passkey'] ."". $timestamp);
+            
+            
+            //Start structuring call to express api
+            $pay_request_data = array( 
+                "BusinessShortCode" => $config['BusinessShortCode'],
+                "Password" => $password,
+                "Timestamp" => $timestamp,
+                "TransactionType" => $config['TransactionType'],
+                "Amount" => $total,
+                "PartyA" => $mobile,
+                "PartyB" => $config['BusinessShortCode'],
+                "PhoneNumber" => $mobile,
+                "CallBackURL" => $config['CallBackURL'],
+                "AccountReference" => $config['AccountReference'],
+                "TransactionDesc" => $config['TransactionDesc']
+            ); 
+            
+            $request_payment_processing = array(
+                'headers' => array(
+                    'Content-Type' => 'application/json',
+                    'Authorization' => 'Bearer '.$token
+                ),
+                'body' => json_encode($pay_request_data)
+            );
+            
+            $endpoint = ($config['env'] == "live") ? "https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest" : "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest"; 
+            
+            $queued = wp_remote_post($endpoint, $request_payment_processing);
+            $queuedBody = wp_remote_retrieve_body( $queued );
+            
+            $queued_response = json_decode($queuedBody);
+            $code= isset( $queued_response -> ResponseCode) ?  $queued_response -> ResponseCode  : '';
+            
+            if ( ( !is_wp_error($queued)) && $code === '0') {
+                $message = isset( $queued_response -> CustomerMessage) ?  $queued_response -> CustomerMessage  : '';
+                // exit();
+            }
+    }
+            $order->update_status('pending-payment', __( 'Awaiting M-Pesa payment', 'kary' ));
+          
+            // Return thankyou redirect
+            return array(
+                'result' => 'success',
+                'redirect' => site_url().'/confirm-payment/?order-id='.$order_id
+            );
+    //         return array(
+    //     'result' => 'success',
+    //     'redirect' => $this->get_return_url( $order )
+    // );
 }
     }
 }
 add_action('plugins_loaded', 'init_custom_gateway_class');
+
 
 
 function add_custom_gateway_class( $methods ) {
